@@ -7,6 +7,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -290,6 +292,31 @@ def write_srt(items: list[SubtitleItem], path: Path):
             f.write(f"{idx}\n{srt_ts(item.start)} --> {srt_ts(item.end)}\n{item.text}\n\n")
 
 
+def parse_srt_blocks(src: Path) -> list[dict]:
+    text = src.read_text(encoding='utf-8').strip()
+    blocks = [b for b in text.split('\n\n') if b.strip()]
+    items = []
+    for b in blocks:
+        lines = b.splitlines()
+        if len(lines) < 3:
+            continue
+        items.append({
+            'index': int(lines[0].strip()),
+            'timestamp': lines[1],
+            'text': ' '.join(lines[2:]).strip(),
+        })
+    return items
+
+
+def write_bilingual_srt_from_map(src: Path, out: Path, translations: dict[int, str]):
+    items = parse_srt_blocks(src)
+    blocks = []
+    for item in items:
+        zh = translations.get(item['index'], '').strip()
+        blocks.append(f"{item['index']}\n{item['timestamp']}\n{item['text']}\n{zh}\n")
+    out.write_text('\n'.join(blocks), encoding='utf-8')
+
+
 def translate_srt_with_gemini(src: Path, out: Path, source_lang: str = 'Japanese', target_lang: str = 'Chinese'):
     prompt = (
         f"你是专业的{source_lang}字幕本地化编辑。输入是一份{source_lang} SRT 字幕。"
@@ -302,6 +329,68 @@ def translate_srt_with_gemini(src: Path, out: Path, source_lang: str = 'Japanese
     srt = src.read_text(encoding='utf-8')
     result = subprocess.run(['gemini', prompt + srt], check=True, text=True, capture_output=True)
     out.write_text(result.stdout, encoding='utf-8')
+
+
+def translate_srt_with_deepseek(src: Path, out: Path, api_key: str, batch_size: int = 60):
+    items = parse_srt_blocks(src)
+    payload_items = [{'index': item['index'], 'jp': item['text']} for item in items]
+
+    def call_batch(batch: list[dict], attempt: int = 1) -> dict[int, str]:
+        prompt = (
+            '你是专业的日语字幕本地化编辑。请把下面这些日语字幕条目翻译成自然、口语化、忠实上下文的简体中文。'
+            '只返回严格 JSON，顶层必须是 {"items":[...]}，每个元素只能包含 index 和 zh。'
+            'index 必须完整保留且顺序不变，不要省略任何条目，不要输出解释。\n\n'
+            f'待翻译条目：{json.dumps(batch, ensure_ascii=False)}'
+        )
+        payload = {
+            'model': 'deepseek-chat',
+            'temperature': 0.2,
+            'response_format': {'type': 'json_object'},
+            'messages': [
+                {'role': 'system', 'content': '你是严谨的字幕翻译器，只能输出合法 JSON。'},
+                {'role': 'user', 'content': prompt},
+            ],
+        }
+        req = urllib.request.Request(
+            'https://api.deepseek.com/chat/completions',
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=300) as r:
+            resp = json.loads(r.read().decode('utf-8'))
+        content = resp['choices'][0]['message']['content']
+        try:
+            obj = json.loads(content)
+        except Exception:
+            if attempt >= 3:
+                raise
+            time.sleep(2)
+            return call_batch(batch, attempt + 1)
+        got = obj.get('items', [])
+        if len(got) != len(batch):
+            if attempt >= 3:
+                raise RuntimeError(f'batch size mismatch: expect {len(batch)} got {len(got)}')
+            time.sleep(2)
+            return call_batch(batch, attempt + 1)
+        translated = {}
+        for raw, translated_item in zip(batch, got):
+            idx = int(translated_item['index'])
+            if idx != int(raw['index']):
+                if attempt >= 3:
+                    raise RuntimeError(f'index mismatch in batch: expect {raw["index"]} got {idx}')
+                time.sleep(2)
+                return call_batch(batch, attempt + 1)
+            translated[idx] = str(translated_item['zh']).strip()
+        return translated
+
+    translations: dict[int, str] = {}
+    for i in range(0, len(payload_items), batch_size):
+        batch = payload_items[i:i + batch_size]
+        print(f'translate batch {i // batch_size + 1}: {batch[0]["index"]}-{batch[-1]["index"]}', flush=True)
+        translations.update(call_batch(batch))
+
+    write_bilingual_srt_from_map(src, out, translations)
 
 
 def main():
@@ -317,7 +406,9 @@ def main():
     ap.add_argument('--aligner-model', default='Qwen/Qwen3-ForcedAligner-0.6B')
     ap.add_argument('--no-align', action='store_true')
     ap.add_argument('--bilingual', action='store_true')
-    ap.add_argument('--translate-with', default='gemini', choices=['gemini'])
+    ap.add_argument('--translate-with', default='deepseek', choices=['gemini', 'deepseek'])
+    ap.add_argument('--deepseek-api-key', default=None)
+    ap.add_argument('--translate-batch-size', type=int, default=60)
     ap.add_argument('--bilingual-output', type=Path, default=None)
     ap.add_argument('--threshold', type=float, default=0.6)
     ap.add_argument('--min-silence-ms', type=int, default=600)
@@ -421,7 +512,13 @@ def main():
     if args.bilingual:
         bilingual_out = args.bilingual_output.resolve() if args.bilingual_output else out.with_name(out.stem + '.ja-zh.srt')
         print(f'translating with {args.translate_with} -> {bilingual_out}', flush=True)
-        translate_srt_with_gemini(out, bilingual_out, source_lang=args.language)
+        if args.translate_with == 'gemini':
+            translate_srt_with_gemini(out, bilingual_out, source_lang=args.language)
+        else:
+            api_key = args.deepseek_api_key or __import__('os').environ.get('DEEPSEEK_API_KEY')
+            if not api_key:
+                raise RuntimeError('DEEPSEEK_API_KEY is required for --translate-with deepseek')
+            translate_srt_with_deepseek(out, bilingual_out, api_key=api_key, batch_size=args.translate_batch_size)
         print(f'bilingual done: {bilingual_out}', flush=True)
 
     if not args.keep_temp:

@@ -10,7 +10,7 @@ The pipeline keeps the same overall structure:
 2. selectable ASR backend
 3. optional alignment
 4. subtitle rechunking
-5. optional Gemini bilingual translation
+5. optional bilingual translation (DeepSeek recommended, Gemini optional)
 
 ## Supported ASR backends
 
@@ -33,7 +33,8 @@ Good for faster long-media transcription:
 - Python 3.12+
 - `ffmpeg`
 - `uv`
-- `gemini` CLI (optional, for bilingual translation)
+- `gemini` CLI (optional)
+- DeepSeek API key for the recommended structured bilingual translation path
 
 ## Setup
 
@@ -68,29 +69,49 @@ python qwen3_subtitles.py input.mp4 \
 
 ## Generate bilingual JA-ZH SRT in the same command
 
+### Recommended: DeepSeek structured translation with batching
+
+```bash
+export DEEPSEEK_API_KEY=your_key_here
+python qwen3_subtitles.py input.mp4 \
+  --language Japanese \
+  --asr-engine funasr \
+  --no-align \
+  --bilingual \
+  --translate-with deepseek \
+  --translate-batch-size 60 \
+  --output input.ja.srt
+```
+
+This keeps subtitle timestamps untouched because the model only returns `index -> zh`, and the script fills translations back into the original SRT locally.
+
+### Optional: Gemini direct bilingual generation
+
 ```bash
 python qwen3_subtitles.py input.mp4 \
   --language Japanese \
   --asr-engine funasr \
   --no-align \
   --bilingual \
+  --translate-with gemini \
   --output input.ja.srt
 ```
 
-This will also produce a bilingual file like:
-
-- `input.ja-zh.srt`
+This can be useful for experiments, but DeepSeek structured translation is more stable for preserving subtitle structure.
 
 ## Recommended practical workflow
 
 For long Japanese videos on CPU:
 
 ```bash
+export DEEPSEEK_API_KEY=your_key_here
 python qwen3_subtitles.py input.mp4 \
   --language Japanese \
   --asr-engine funasr \
   --no-align \
-  --bilingual
+  --bilingual \
+  --translate-with deepseek \
+  --translate-batch-size 60
 ```
 
 For alignment experiments:
