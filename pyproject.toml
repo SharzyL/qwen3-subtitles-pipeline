@@ -1,13 +1,23 @@
 [project]
 name = "qwen3-subtitles-pipeline"
-version = "0.1.0"
-description = "Qwen3 subtitle pipeline with compute chunking, forced alignment, and subtitle rechunking"
+version = "0.2.0"
+description = "Subtitle pipeline with Qwen3 alignment and FunASR/SenseVoice transcription support"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "qwen-asr",
   "silero-vad",
   "soundfile",
+]
+
+[project.optional-dependencies]
+funasr = [
+  "funasr",
+  "modelscope",
+]
+all = [
+  "funasr",
+  "modelscope",
 ]
 
 [tool.uv]
