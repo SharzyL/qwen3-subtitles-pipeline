@@ -335,7 +335,7 @@ def translate_srt_with_deepseek(src: Path, out: Path, api_key: str, batch_size: 
     items = parse_srt_blocks(src)
     payload_items = [{'index': item['index'], 'jp': item['text']} for item in items]
 
-    def call_batch(batch: list[dict], attempt: int = 1) -> dict[int, str]:
+    def call_once(batch: list[dict]) -> dict[int, str]:
         prompt = (
             '你是专业的日语字幕本地化编辑。请把下面这些日语字幕条目翻译成自然、口语化、忠实上下文的简体中文。'
             '只返回严格 JSON，顶层必须是 {"items":[...]}，每个元素只能包含 index 和 zh。'
@@ -360,29 +360,32 @@ def translate_srt_with_deepseek(src: Path, out: Path, api_key: str, batch_size: 
         with urllib.request.urlopen(req, timeout=300) as r:
             resp = json.loads(r.read().decode('utf-8'))
         content = resp['choices'][0]['message']['content']
-        try:
-            obj = json.loads(content)
-        except Exception:
-            if attempt >= 3:
-                raise
-            time.sleep(2)
-            return call_batch(batch, attempt + 1)
+        obj = json.loads(content)
         got = obj.get('items', [])
         if len(got) != len(batch):
-            if attempt >= 3:
-                raise RuntimeError(f'batch size mismatch: expect {len(batch)} got {len(got)}')
-            time.sleep(2)
-            return call_batch(batch, attempt + 1)
+            raise RuntimeError(f'batch size mismatch: expect {len(batch)} got {len(got)}')
         translated = {}
         for raw, translated_item in zip(batch, got):
             idx = int(translated_item['index'])
             if idx != int(raw['index']):
-                if attempt >= 3:
-                    raise RuntimeError(f'index mismatch in batch: expect {raw["index"]} got {idx}')
-                time.sleep(2)
-                return call_batch(batch, attempt + 1)
+                raise RuntimeError(f'index mismatch in batch: expect {raw["index"]} got {idx}')
             translated[idx] = str(translated_item['zh']).strip()
         return translated
+
+    def call_batch(batch: list[dict], attempt: int = 1) -> dict[int, str]:
+        try:
+            return call_once(batch)
+        except Exception:
+            if attempt < 3:
+                time.sleep(2)
+                return call_batch(batch, attempt + 1)
+            if len(batch) == 1:
+                raise
+            mid = len(batch) // 2
+            left = call_batch(batch[:mid], 1)
+            right = call_batch(batch[mid:], 1)
+            left.update(right)
+            return left
 
     translations: dict[int, str] = {}
     for i in range(0, len(payload_items), batch_size):
