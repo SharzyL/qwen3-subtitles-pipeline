@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.mkv
+*.webm
+*.srt
+*.json
+/tmp/

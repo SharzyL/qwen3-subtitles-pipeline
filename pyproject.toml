@@ -1,0 +1,14 @@
+[project]
+name = "qwen3-subtitles-pipeline"
+version = "0.1.0"
+description = "Qwen3 subtitle pipeline with compute chunking, forced alignment, and subtitle rechunking"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "qwen-asr",
+  "silero-vad",
+  "soundfile",
+]
+
+[tool.uv]
+package = false
